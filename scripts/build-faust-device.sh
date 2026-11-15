@@ -29,7 +29,14 @@ sed \
 
 mkdir -p "$(dirname "$output")"
 core="$root/external/BareDAW-core"
-flags=(-std=c++17 -O2 -fPIC -fno-rtti -I"$root/src" -I"$core/src")
+flags=(
+  -std=c++17 -O2 -fPIC -fno-rtti
+  -I"$root/src"
+  -I"$core/src"
+  -I"$core/src/core"
+  -I"$core/src/engine/public"
+  -I"$core/src/io"
+)
 if [[ $(uname -s) == Darwin ]]; then
   "$cxx" "${flags[@]}" -dynamiclib "$work/plugin.cpp" -o "$output"
 else

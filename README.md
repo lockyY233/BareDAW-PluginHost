@@ -18,5 +18,7 @@ CLAP is enabled by default. VST3 is opt-in with
 
 Faust AOT devices and Faust JIT remain owned by BareDAW Core. The helper in
 `scripts/build-faust-device.sh` is here because it emits a dynamic plugin for
-the PluginHost ABI.
+the PluginHost ABI. Example post-build Faust plugins live under
+`examples/faust/post-build` and are covered by the PluginHost test suite when
+the Faust compiler is available.
 

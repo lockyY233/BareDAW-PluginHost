@@ -134,6 +134,40 @@ if (BAREDAW_PLUGIN_HOST_BUILD_TESTS)
         add_test(NAME baredaw_plugin_host_smoke
             COMMAND baredaw_plugin_host_smoke "${BAREDAW_PLUGIN_FIXTURES_DIR}")
     endif()
+
+    find_program(BAREDAW_TEST_FAUST_EXECUTABLE faust)
+    if (BAREDAW_TEST_FAUST_EXECUTABLE)
+        set(BAREDAW_FAUST_PLUGIN_FIXTURES
+            "${CMAKE_BINARY_DIR}/faust-plugin-fixtures")
+        set(_baredaw_post_build_outputs "")
+        foreach(_name IN ITEMS gain invert softclip onepole dcblock)
+            set(_output
+                "${BAREDAW_FAUST_PLUGIN_FIXTURES}/post_${_name}${CMAKE_SHARED_LIBRARY_SUFFIX}")
+            add_custom_command(OUTPUT "${_output}"
+                COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/scripts/build-faust-device.sh"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/examples/faust/post-build/${_name}.dsp"
+                    "post.${_name}" "${_output}" "${CMAKE_CXX_COMPILER}"
+                DEPENDS
+                    "${CMAKE_CURRENT_SOURCE_DIR}/examples/faust/post-build/${_name}.dsp"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/scripts/build-faust-device.sh"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/src/bridge/faust/PostBuildPluginTemplate.cpp.in"
+                VERBATIM)
+            list(APPEND _baredaw_post_build_outputs "${_output}")
+        endforeach()
+        add_custom_target(baredaw_faust_plugin_fixtures
+            DEPENDS ${_baredaw_post_build_outputs})
+        add_executable(baredaw_faust_post_build_smoke
+            tests/native/faust_post_build_smoke.cpp)
+        target_link_libraries(baredaw_faust_post_build_smoke PRIVATE
+            BareDAW::Core BareDAW::PluginHost)
+        target_compile_options(baredaw_faust_post_build_smoke PRIVATE
+            $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-UNDEBUG;-fno-rtti>)
+        add_dependencies(baredaw_faust_post_build_smoke
+            baredaw_faust_plugin_fixtures)
+        add_test(NAME baredaw_faust_post_build_smoke
+            COMMAND baredaw_faust_post_build_smoke
+                "${BAREDAW_FAUST_PLUGIN_FIXTURES}")
+    endif()
 endif()
 
 include(GNUInstallDirs)
