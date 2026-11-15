@@ -1,0 +1,30 @@
+#include "bridge/plugin-host/HostApi.h"
+#include "bridge/plugin-host/PluginDescriptor.h"
+#include "engine/public/devices/GenericFaustDevice.h"
+#include "@GENERATED@"
+
+namespace {
+void *makeDevice(void *, double sampleRate, uint32_t maxBlock) {
+    auto *device = new GenericFaustDevice<BareDAWPostDSP>("@TYPE@");
+    device->prepare(sampleRate, static_cast<int>(maxBlock));
+    return device;
+}
+void destroyDevice(void *, void *p) { delete static_cast<Device *>(p); }
+}
+
+extern "C" int baredaw_plugin_init(const BareDAW_HostApi *host, BareDAW_PluginDescriptor *desc) {
+    if (!host || host->abi_version >> 16 != BAREDAW_PLUGIN_ABI_VERSION_MAJOR ||
+        host->struct_size < sizeof(BareDAW_HostApi) || !host->register_device || !desc)
+        return 1;
+    desc->abi_version = BAREDAW_PLUGIN_ABI_VERSION;
+    desc->struct_size = sizeof(*desc);
+    desc->id = "@TYPE@";
+    desc->name = "@TYPE@";
+    desc->vendor = "Faust user device";
+    desc->version = "1.0";
+    desc->kind = 1;
+    desc->accepts_audio = desc->produces_audio = 1;
+    desc->accepts_midi = desc->produces_midi = 0;
+    desc->features = "faust,effect";
+    return host->register_device(host->host_ctx, "@TYPE@", makeDevice, destroyDevice, 2, 2) == 0 ? 0 : 1;
+}

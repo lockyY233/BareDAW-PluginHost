@@ -1,0 +1,3 @@
+[submodule "external/BareDAW-core"]
+	path = external/BareDAW-core
+	url = https://github.com/lockyY233/BareDAW-core.git
