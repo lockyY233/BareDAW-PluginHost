@@ -2,7 +2,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-core="${BAREDAW_CORE_SOURCE_DIR:-$root/external/BareDAW-core}"
+core="${BAREDAW_CORE_SOURCE_DIR:-$root/external/BareDAW}"
 
 if rg -n '#include[[:space:]]*[<"]engine/private' "$root/src"; then
   echo "PluginHost must use only public BareDAW Core APIs." >&2

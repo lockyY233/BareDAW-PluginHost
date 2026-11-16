@@ -16,21 +16,21 @@ if (EMSCRIPTEN)
     message(FATAL_ERROR "BareDAW PluginHost is native-only")
 endif()
 
-set(_baredaw_submodule_core "${CMAKE_CURRENT_SOURCE_DIR}/external/BareDAW-core")
+set(_baredaw_submodule_core "${CMAKE_CURRENT_SOURCE_DIR}/external/BareDAW")
 set(BAREDAW_CORE_SOURCE_DIR "${_baredaw_submodule_core}" CACHE PATH
-    "BareDAW-core source directory")
+    "BareDAW source directory")
 get_filename_component(BAREDAW_CORE_SOURCE_DIR "${BAREDAW_CORE_SOURCE_DIR}"
     ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 if (NOT EXISTS "${BAREDAW_CORE_SOURCE_DIR}/CMakeLists.txt")
     message(FATAL_ERROR
-        "BareDAW-core was not found at ${BAREDAW_CORE_SOURCE_DIR}. "
+        "BareDAW was not found at ${BAREDAW_CORE_SOURCE_DIR}. "
         "Run 'git submodule update --init --recursive' or set BAREDAW_CORE_SOURCE_DIR.")
 endif()
 
 if (NOT TARGET BareDAW::Core)
     set(BAREDAW_CORE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     add_subdirectory("${BAREDAW_CORE_SOURCE_DIR}"
-        "${CMAKE_CURRENT_BINARY_DIR}/baredaw-core")
+        "${CMAKE_CURRENT_BINARY_DIR}/baredaw")
 endif()
 
 if (BAREDAW_ENABLE_VST3)

@@ -28,7 +28,7 @@ sed \
   "$root/src/bridge/faust/PostBuildPluginTemplate.cpp.in" > "$work/plugin.cpp"
 
 mkdir -p "$(dirname "$output")"
-core="$root/external/BareDAW-core"
+core="$root/external/BareDAW"
 flags=(
   -std=c++17 -O2 -fPIC -fno-rtti
   -I"$root/src"

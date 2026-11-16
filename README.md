@@ -4,9 +4,7 @@ Optional native plugin hosting for BareDAW. This repository adapts CLAP and
 VST3 plugins to the public BareDAW device API. It is not required by BareDAW,
 WASM, or embedded builds.
 
-Here, **BareDAW** means the engine in the `BareDAW-core` repository. The
-`-core` suffix distinguishes that repository from integrations such as this
-one; PluginHost extends BareDAW but is not part of the engine itself.
+PluginHost extends BareDAW but is not required to build or use the engine.
 
 ## Build
 
