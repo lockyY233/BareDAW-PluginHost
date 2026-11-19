@@ -264,14 +264,28 @@ public:
         debugUi("instance.destructor.begin",
                 "processBlocks=" + std::to_string(processCallCount()));
         destroy();
+        debugUi("instance.destructor.handler.begin");
         if (controller_) controller_->setComponentHandler(nullptr);
+        debugUi("instance.destructor.handler.end");
+        debugUi("instance.destructor.processing.begin");
         if (processor_ && processing_) processor_->setProcessing(false);
+        processing_ = false;
+        debugUi("instance.destructor.processing.end");
+        debugUi("instance.destructor.active.begin");
         if (component_ && active_) component_->setActive(false);
+        active_ = false;
+        debugUi("instance.destructor.active.end");
+        debugUi("instance.destructor.process-data.begin");
         processData_.unprepare();
+        debugUi("instance.destructor.process-data.end");
+        debugUi("instance.destructor.references.begin");
         controller_ = nullptr;
         processor_ = nullptr;
         component_ = nullptr;
+        debugUi("instance.destructor.references.end");
+        debugUi("instance.destructor.provider.begin");
         provider_ = nullptr;
+        debugUi("instance.destructor.provider.end");
         if (counted_) --*info_.liveInstances;
         debugUi("instance.destructor.end");
     }
