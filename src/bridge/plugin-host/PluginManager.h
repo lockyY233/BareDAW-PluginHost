@@ -43,6 +43,14 @@ namespace pluginhost
 class PluginManager
 {
 public:
+    struct TypeMetadata
+    {
+        std::string type;
+        std::string displayName;
+        uint8_t accepts = 0;
+        uint8_t produces = 0;
+    };
+
     // severity: 0 = info, 1 = warn, 2 = error
     using Logger = std::function<void(int severity, const std::string &message)>;
 
@@ -72,6 +80,9 @@ public:
     // already-loaded plugins. Used by the native startup screen to keep the UI
     // responsive and show progress one cached bundle at a time.
     size_t scanAndLoadPath(const std::filesystem::path &pluginPath);
+    void registerLazyBundle(const std::filesystem::path &pluginPath,
+                            const std::vector<TypeMetadata> &types);
+    std::vector<TypeMetadata> typeMetadata() const;
 
     // Unregisters every type this manager registered and dlcloses each lib.
     // Safe to call multiple times. After a successful unloadAll, the manager
@@ -132,6 +143,9 @@ private:
     // collide with std::log from <cmath>.
     void logMessage(int severity, const std::string &message);
     size_t scanPaths(const std::vector<std::filesystem::path> &paths);
+    bool activateLazyType(const std::string &type);
+    void installLazyBundle(const std::filesystem::path &path,
+                           const std::vector<TypeMetadata> &types);
 
     BareDAW_HostApi hostApi_{}; // populated in ctor
 
@@ -150,6 +164,9 @@ private:
     // BareDAW-native plugin could carry per-type state into factory().
     std::unordered_map<std::string, void *> pluginDataByType_;
     std::unordered_map<std::string, std::string> displayNamesByType_;
+    std::unordered_map<std::string, TypeMetadata> metadataByType_;
+    std::unordered_map<std::string, std::filesystem::path> lazyPathByType_;
+    std::unordered_map<std::string, std::vector<TypeMetadata>> lazyTypesByPath_;
 };
 
 }

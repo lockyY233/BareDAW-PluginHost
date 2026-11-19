@@ -163,8 +163,13 @@ bool PluginManager::unloadAll()
         registry.unregisterDevice(type);
         pluginDataByType_.erase(type);
     }
+    for (const auto &[type, path] : lazyPathByType_)
+        registry.unregisterDevice(type);
     registeredTypes_.clear();
     displayNamesByType_.clear();
+    metadataByType_.clear();
+    lazyPathByType_.clear();
+    lazyTypesByPath_.clear();
 
     for (auto &lib : libs_) {
 #if BAREDAW_ENABLE_CLAP
@@ -208,6 +213,74 @@ size_t PluginManager::scanAndLoad()
 size_t PluginManager::scanAndLoadPath(const fs::path &pluginPath)
 {
     return scanPaths(std::vector<fs::path>{pluginPath});
+}
+
+void PluginManager::installLazyBundle(const fs::path &path,
+                                      const std::vector<TypeMetadata> &types)
+{
+    const std::string key = path.lexically_normal().string();
+    lazyTypesByPath_[key] = types;
+    for (const auto &meta : types) {
+        if (meta.type.empty() || DeviceRegistry::instance().hasType(meta.type)) continue;
+        lazyPathByType_[meta.type] = path;
+        metadataByType_[meta.type] = meta;
+        displayNamesByType_[meta.type] = meta.displayName.empty() ? meta.type : meta.displayName;
+        registeredTypes_.push_back(meta.type);
+        DeviceRegistry::instance().registerDevice(
+            meta.type,
+            [this, type = meta.type]() -> std::unique_ptr<Device> {
+                if (!activateLazyType(type)) return nullptr;
+                return DeviceRegistry::instance().create(type);
+            },
+            static_cast<DeviceIO>(meta.accepts),
+            static_cast<DeviceIO>(meta.produces));
+    }
+}
+
+void PluginManager::registerLazyBundle(const fs::path &pluginPath,
+                                       const std::vector<TypeMetadata> &types)
+{
+    if (!types.empty()) installLazyBundle(pluginPath, types);
+}
+
+bool PluginManager::activateLazyType(const std::string &type)
+{
+    const auto pathIt = lazyPathByType_.find(type);
+    if (pathIt == lazyPathByType_.end()) return DeviceRegistry::instance().hasType(type);
+    const fs::path path = pathIt->second;
+    const std::string key = path.lexically_normal().string();
+    const auto bundleIt = lazyTypesByPath_.find(key);
+    if (bundleIt == lazyTypesByPath_.end()) return false;
+    const auto cachedTypes = bundleIt->second;
+
+    for (const auto &meta : cachedTypes) {
+        DeviceRegistry::instance().unregisterDevice(meta.type);
+        lazyPathByType_.erase(meta.type);
+        registeredTypes_.erase(std::remove(registeredTypes_.begin(), registeredTypes_.end(),
+                                           meta.type), registeredTypes_.end());
+    }
+    lazyTypesByPath_.erase(key);
+    if (scanAndLoadPath(path) != 0 && DeviceRegistry::instance().hasType(type))
+        return true;
+
+    logMessage(2, "lazy load failed: " + path.string());
+    installLazyBundle(path, cachedTypes);
+    return false;
+}
+
+std::vector<PluginManager::TypeMetadata> PluginManager::typeMetadata() const
+{
+    std::vector<TypeMetadata> result;
+    result.reserve(metadataByType_.size());
+    for (const auto &[type, metadata] : metadataByType_) {
+        auto copy = metadata;
+        copy.displayName = displayNameForType(type);
+        result.push_back(std::move(copy));
+    }
+    std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) {
+        return a.type < b.type;
+    });
+    return result;
 }
 
 size_t PluginManager::scanPaths(const std::vector<fs::path> &paths)
@@ -455,6 +528,8 @@ bool PluginManager::onRegister(const char *typeName,
 
     if (lib) lib->types.emplace_back(typeName);
     registeredTypes_.emplace_back(typeName);
+    metadataByType_[typeName] = TypeMetadata{
+        typeName, displayNameForType(typeName), accepts, produces};
     (void)destroy; // captured indirectly: Device's destructor is virtual,
                    // PluginDevice's destructor is virtual (it overrides
                    // Device::~Device). Registry::create returns a
