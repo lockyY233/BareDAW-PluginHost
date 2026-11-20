@@ -54,6 +54,7 @@ struct RegistrationInfo
     uint8_t acceptsIo = 0;
     uint8_t producesIo = 0;
     bool isInstrument = false;
+    bool hasEventOutput = false;
     std::shared_ptr<std::atomic<uint32_t>> liveInstances =
         std::make_shared<std::atomic<uint32_t>>(0);
 };
@@ -123,7 +124,8 @@ class Vst3PluginDevice final : public Device, public NativePluginEditor
 public:
     explicit Vst3PluginDevice(const RegistrationInfo &info)
         : info_(info), componentHandler_(*this), plugFrame_(*this),
-          events_(MidiBuffer::MaxMidiEventsPerBlock + 32)
+          events_(MidiBuffer::MaxMidiEventsPerBlock + 32),
+          outputEvents_(MidiBuffer::MaxMidiEventsPerBlock + 32)
     {
         auto configurationFailed = [&](const char *stage) {
             debugUi("instance.configure.failed", stage);
@@ -157,8 +159,11 @@ public:
                 "audioInputs=" + std::to_string(inputBuses) +
                 " audioOutputs=" + std::to_string(outputBuses) +
                 " eventInputs=" +
-                std::to_string(component_->getBusCount(kEvent, kInput)));
-        if (outputBuses < 1) {
+                std::to_string(component_->getBusCount(kEvent, kInput)) +
+                " eventOutputs=" +
+                std::to_string(component_->getBusCount(kEvent, kOutput)) +
+                " role=" + (info.isInstrument ? "instrument" : "effect"));
+        if (outputBuses < 1 && !info.hasEventOutput) {
             configurationFailed("main-output-bus");
             return;
         }
@@ -189,7 +194,8 @@ public:
         debugUi("instance.bus-arrangements",
                 "result=" + std::to_string(arrangementResult));
 
-        if (component_->activateBus(kAudio, kOutput, 0, true) != kResultTrue) {
+        if (outputBuses > 0 &&
+            component_->activateBus(kAudio, kOutput, 0, true) != kResultTrue) {
             configurationFailed("activate-main-output");
             return;
         }
@@ -213,14 +219,18 @@ public:
 
         const int32 eventInputs = component_->getBusCount(kEvent, kInput);
         if (eventInputs > 0) component_->activateBus(kEvent, kInput, 0, true);
+        const int32 eventOutputs = component_->getBusCount(kEvent, kOutput);
+        if (eventOutputs > 0) component_->activateBus(kEvent, kOutput, 0, true);
 
         BusInfo outputInfo{};
-        if (component_->getBusInfo(kAudio, kOutput, 0, outputInfo) != kResultTrue ||
-            outputInfo.channelCount < 1 || outputInfo.channelCount > 2) {
-            configurationFailed("main-output-layout");
-            return;
+        if (outputBuses > 0) {
+            if (component_->getBusInfo(kAudio, kOutput, 0, outputInfo) != kResultTrue ||
+                outputInfo.channelCount < 1 || outputInfo.channelCount > 2) {
+                configurationFailed("main-output-layout");
+                return;
+            }
+            outputChannels_ = outputInfo.channelCount;
         }
-        outputChannels_ = outputInfo.channelCount;
         if (inputBuses > 0) {
             BusInfo inputInfo{};
             if (component_->getBusInfo(kAudio, kInput, 0, inputInfo) != kResultTrue ||
@@ -245,6 +255,7 @@ public:
             return;
         }
         processData_.inputEvents = &events_;
+        processData_.outputEvents = &outputEvents_;
         processData_.inputParameterChanges = &inputParameters_;
         processData_.processContext = &processContext_;
         processContext_.sampleRate = info.sampleRate;
@@ -306,6 +317,10 @@ public:
     // queued indefinitely and a later transport start delivers a stale burst.
     bool hasTail() const override { return info_.isInstrument; }
     bool requiresContinuousProcessing() const override { return true; }
+    bool midiOutputRequiresProcess() const override
+    {
+        return info_.hasEventOutput && (info_.producesIo & 2u) == 0;
+    }
     uint64_t processCallCount() const override
     {
         return processCalls_.load(std::memory_order_relaxed);
@@ -382,6 +397,7 @@ public:
             }
             processData_.setChannelBuffers(kInput, 0, inputPtrs.data(), inputChannels_);
         }
+        outputEvents_.clear();
         for (int32 ch = 0; ch < outputChannels_; ++ch)
             std::fill_n(outputPtrs_[ch], availableFrames, 0.0f);
         processData_.setChannelBuffers(kOutput, 0, outputPtrs_.data(), outputChannels_);
@@ -426,6 +442,47 @@ public:
         }
         events_.clear();
         inputParameters_.clearQueue();
+    }
+
+    void collectMidiOutput(const MidiBuffer &input, MidiBuffer &output,
+                           int64_t blockStart) override
+    {
+        // An audio plugin's event output describes notes it may expose to the
+        // host; it does not make that plugin a serial MIDI transformer. Serum
+        // 2 and Serum 2 FX both advertise such a bus but do not echo their
+        // input through it, which would starve every later instrument. Any
+        // audio-producing plugin therefore forwards its input. Only dedicated
+        // MIDI-only effects replace the chain with their generated events.
+        const bool isMidiOnlyProcessor =
+            info_.hasEventOutput && (info_.producesIo & 2u) == 0;
+        if (!isMidiOnlyProcessor) {
+            Device::collectMidiOutput(input, output, blockStart);
+            return;
+        }
+        output.clear();
+        Event event{};
+        const int32 count = outputEvents_.getEventCount();
+        for (int32 index = 0; index < count; ++index) {
+            if (outputEvents_.getEvent(index, event) != kResultTrue) continue;
+            RawMidiEvent raw{};
+            raw.sampleTime = blockStart + std::max<int32>(0, event.sampleOffset);
+            if (event.type == Event::kNoteOnEvent) {
+                raw.status = static_cast<uint8_t>(0x90 |
+                    std::clamp<int32>(event.noteOn.channel, 0, 15));
+                raw.d1 = static_cast<uint8_t>(std::clamp<int32>(event.noteOn.pitch, 0, 127));
+                raw.d2 = static_cast<uint8_t>(std::clamp<int>(
+                    static_cast<int>(std::lround(event.noteOn.velocity * 127.0f)), 1, 127));
+            } else if (event.type == Event::kNoteOffEvent) {
+                raw.status = static_cast<uint8_t>(0x80 |
+                    std::clamp<int32>(event.noteOff.channel, 0, 15));
+                raw.d1 = static_cast<uint8_t>(std::clamp<int32>(event.noteOff.pitch, 0, 127));
+                raw.d2 = 0;
+            } else {
+                continue;
+            }
+            output.push(raw);
+        }
+        outputEvents_.clear();
     }
 
     void allNotesOff() override
@@ -812,6 +869,7 @@ private:
     HostProcessData processData_;
     ProcessContext processContext_{};
     EventList events_;
+    EventList outputEvents_;
     ParameterChanges inputParameters_;
     std::vector<float> outputScratch_;
     std::vector<float> inputScratch_;
@@ -945,15 +1003,19 @@ size_t registerFromBundle(const char *bundlePath,
         uint8_t accepts = 0;
         uint8_t produces = 0;
         const bool hasAudioInput = component->getBusCount(kAudio, kInput) > 0;
+        const bool hasAudioOutput = component->getBusCount(kAudio, kOutput) > 0;
         const bool hasEventInput = component->getBusCount(kEvent, kInput) > 0;
-        const bool isInstrument = declaredInstrument || (hasEventInput && !hasAudioInput);
+        const bool hasEventOutput = component->getBusCount(kEvent, kOutput) > 0;
+        const bool isInstrument = declaredInstrument ||
+            (hasEventInput && !hasAudioInput && hasAudioOutput);
         // Optional audio inputs on synths/vocoders do not turn them into insert
         // effects. DeviceIO describes their place in BareDAW's chain; the
         // adapter still supplies their actual VST3 audio input buses.
         if (hasAudioInput && !isInstrument) accepts |= 2;
         if (hasEventInput) accepts |= 1;
-        if (component->getBusCount(kAudio, kOutput) > 0) produces |= 2;
-        if ((produces & 2) == 0) continue; // MIDI-only output is not routed yet.
+        if (hasAudioOutput) produces |= 2;
+        if (hasEventOutput || isInstrument) produces |= 1;
+        if (produces == 0) continue;
 
         auto *info = new RegistrationInfo;
         info->module = module;
@@ -965,6 +1027,7 @@ size_t registerFromBundle(const char *bundlePath,
         info->acceptsIo = accepts;
         info->producesIo = produces;
         info->isInstrument = isInstrument;
+        info->hasEventOutput = hasEventOutput;
 
         if (hostApi.register_device(info, info->typeName.c_str(), vst3Factory,
                                     vst3Destroy, accepts, produces) != 0) {

@@ -69,6 +69,8 @@ struct ClapInstanceState
     static constexpr uint32_t kMaxParamsPerBlock = 256;
     clap_event_param_value_t paramScratch[kMaxParamsPerBlock];
     uint32_t paramScratchCount = 0;
+    MidiBuffer midiOutput;
+    int64_t outputBlockStart = 0;
 
     // input_events vtable — points into this ClapInstanceState via ctx.
     static uint32_t inEventsSize(const clap_input_events *list)
@@ -87,8 +89,36 @@ struct ClapInstanceState
     }
     clap_input_events_t inputEvents{nullptr, inEventsSize, inEventsGet};
 
-    // output_events: we don't accept MIDI back from the plugin in v1. Drop.
-    static bool outEventsTryPush(const clap_output_events *, const clap_event_header_t *) { return false; }
+    static bool outEventsTryPush(const clap_output_events *list,
+                                 const clap_event_header_t *header)
+    {
+        if (!list || !header || header->space_id != CLAP_CORE_EVENT_SPACE_ID)
+            return false;
+        auto *self = reinterpret_cast<ClapInstanceState *>(list->ctx);
+        RawMidiEvent raw{};
+        raw.sampleTime = self->outputBlockStart + header->time;
+        if (header->type == CLAP_EVENT_MIDI) {
+            const auto *event = reinterpret_cast<const clap_event_midi_t *>(header);
+            raw.status = event->data[0];
+            raw.d1 = event->data[1];
+            raw.d2 = event->data[2];
+        } else if (header->type == CLAP_EVENT_NOTE_ON ||
+                   header->type == CLAP_EVENT_NOTE_OFF) {
+            const auto *event = reinterpret_cast<const clap_event_note_t *>(header);
+            raw.status = static_cast<uint8_t>(
+                (header->type == CLAP_EVENT_NOTE_ON ? 0x90 : 0x80) |
+                std::clamp<int16_t>(event->channel, 0, 15));
+            raw.d1 = static_cast<uint8_t>(std::clamp<int32_t>(event->key, 0, 127));
+            raw.d2 = header->type == CLAP_EVENT_NOTE_ON
+                ? static_cast<uint8_t>(std::clamp<int>(
+                    static_cast<int>(std::lround(event->velocity * 127.0)), 1, 127))
+                : 0;
+        } else {
+            return true;
+        }
+        self->midiOutput.push(raw);
+        return true;
+    }
     clap_output_events_t outputEvents{nullptr, outEventsTryPush};
 };
 
@@ -105,6 +135,7 @@ struct ClapRegistrationInfo
     uint8_t acceptsIo;                           // 1=Midi, 2=Audio
     uint8_t producesIo;
     bool isInstrument = false;
+    bool hasNoteOutput = false;
     std::shared_ptr<std::atomic_uint32_t> liveInstances;
 };
 
@@ -212,18 +243,21 @@ public:
                 return;
             }
         }
-        if (state_.audioInputCount > 8 || state_.audioOutputCount != 1 ||
-            state_.mainOutputInfo.channel_count == 0 ||
-            state_.mainOutputInfo.channel_count > state_.outputChannelPtrs.size()) {
+        if (state_.audioInputCount > 8 || state_.audioOutputCount > 1 ||
+            (state_.audioOutputCount == 1 &&
+             (state_.mainOutputInfo.channel_count == 0 ||
+              state_.mainOutputInfo.channel_count > state_.outputChannelPtrs.size()))) {
             state_.plugin->destroy(state_.plugin);
             state_.plugin = nullptr;
             return;
         }
-        state_.outputScratch.resize(static_cast<size_t>(info.maxBlock) *
-                                    state_.mainOutputInfo.channel_count);
-        for (uint32_t ch = 0; ch < state_.mainOutputInfo.channel_count; ++ch)
-            state_.outputChannelPtrs[ch] = state_.outputScratch.data() +
-                                           static_cast<size_t>(ch) * info.maxBlock;
+        if (state_.audioOutputCount == 1) {
+            state_.outputScratch.resize(static_cast<size_t>(info.maxBlock) *
+                                        state_.mainOutputInfo.channel_count);
+            for (uint32_t ch = 0; ch < state_.mainOutputInfo.channel_count; ++ch)
+                state_.outputChannelPtrs[ch] = state_.outputScratch.data() +
+                                               static_cast<size_t>(ch) * info.maxBlock;
+        }
 
         state_.inputBuffers.resize(state_.audioInputCount);
         state_.inputPortChannelPtrs.resize(state_.audioInputCount);
@@ -309,6 +343,10 @@ public:
     // continuous-instrument capability is expressed through hasTail().
     bool hasTail() const override { return info_.isInstrument; }
     bool requiresContinuousProcessing() const override { return true; }
+    bool midiOutputRequiresProcess() const override
+    {
+        return info_.hasNoteOutput && (info_.producesIo & 2u) == 0;
+    }
     uint64_t processCallCount() const override
     {
         return processCalls_.load(std::memory_order_relaxed);
@@ -410,22 +448,23 @@ public:
     void process(AudioBuffer &buffer, int frames, int writeOffset,
                  int64_t globalSamplePosition) override
     {
-        if (!active_ || !state_.plugin || !state_.audioPorts) return;
+        if (!active_ || !state_.plugin) return;
         const uint32_t inCount = state_.audioInputCount;
         const auto &outInfo = state_.mainOutputInfo;
         if (outInfo.channel_count > static_cast<uint32_t>(buffer.numChannels())) return;
         const int availableCh = static_cast<int>(outInfo.channel_count);
         const int availableFr = std::min<int>(frames, buffer.numFrames() - writeOffset);
-        if (availableCh <= 0 || availableFr <= 0 ||
-            availableFr > static_cast<int>(info_.maxBlock)) return;
+        if (availableFr <= 0 || availableFr > static_cast<int>(info_.maxBlock)) return;
 
         // Render into preallocated scratch, then copy back into the engine
         // buffer. This works even when a plugin does not support in-place I/O.
         clap_audio_buffer_t outBuf{};
-        outBuf.channel_count = static_cast<uint32_t>(availableCh);
-        outBuf.data32 = state_.outputChannelPtrs.data();
-        outBuf.constant_mask = 0;
-        outBuf.latency = 0;
+        if (state_.audioOutputCount == 1) {
+            outBuf.channel_count = static_cast<uint32_t>(availableCh);
+            outBuf.data32 = state_.outputChannelPtrs.data();
+            outBuf.constant_mask = 0;
+            outBuf.latency = 0;
+        }
 
         for (uint32_t port = 0; port < inCount; ++port) {
             const uint32_t channels = state_.inputPortInfos[port].channel_count;
@@ -453,12 +492,14 @@ public:
         proc.frames_count = static_cast<uint32_t>(availableFr);
         proc.audio_inputs = inCount ? state_.inputBuffers.data() : nullptr;
         proc.audio_inputs_count = inCount;
-        proc.audio_outputs = &outBuf;
-        proc.audio_outputs_count = 1;
+        proc.audio_outputs = state_.audioOutputCount == 1 ? &outBuf : nullptr;
+        proc.audio_outputs_count = state_.audioOutputCount;
         proc.in_events = &state_.inputEvents;
         proc.out_events = &state_.outputEvents;
         proc.transport = nullptr;
 
+        state_.midiOutput.clear();
+        state_.outputBlockStart = globalSamplePosition;
         processCalls_.fetch_add(1, std::memory_order_relaxed);
         const clap_process_status status = state_.plugin->process(state_.plugin, &proc);
         if (status != CLAP_PROCESS_ERROR) {
@@ -472,6 +513,22 @@ public:
         // empty (we re-fill from processMidi each block).
         state_.midiScratchCount = 0;
         state_.paramScratchCount = 0;
+    }
+
+    void collectMidiOutput(const MidiBuffer &input, MidiBuffer &output,
+                           int64_t blockStart) override
+    {
+        // Audio plugins are not required to echo note input through an exposed
+        // note-output port. Keep them transparent to the serial MIDI chain;
+        // only dedicated MIDI-only processors replace it with plugin output.
+        const bool isMidiOnlyProcessor =
+            info_.hasNoteOutput && (info_.producesIo & 2u) == 0;
+        if (!isMidiOnlyProcessor) {
+            Device::collectMidiOutput(input, output, blockStart);
+            return;
+        }
+        output = state_.midiOutput;
+        state_.midiOutput.clear();
     }
 
     void processMidi(const MidiBuffer &midi, int64_t globalSamplePosition) override
@@ -806,6 +863,7 @@ size_t registerFromLib(void * /*dlHandle*/,
         uint8_t acceptsIo = 0;
         uint8_t producesIo = 0;
         computeIo(probe, audioPorts, notePorts, acceptsIo, producesIo);
+        const bool hasNoteOutput = notePorts && notePorts->count(probe, false) > 0;
         if (acceptsIo == 0 && producesIo == 0) {
             hostApi.log(hostApi.host_ctx, 1,
                         (std::string("clap plugin has no discoverable audio or note ports: ")
@@ -839,8 +897,11 @@ size_t registerFromLib(void * /*dlHandle*/,
             ((acceptsIo & 1) != 0 && (acceptsIo & 2) == 0 && (producesIo & 2) != 0);
         if (info->isInstrument)
             acceptsIo &= static_cast<uint8_t>(~2u); // optional audio input is not chain role
+        if (info->isInstrument)
+            producesIo |= 1; // host passthrough when the synth has no note output
         info->acceptsIo = acceptsIo;
         info->producesIo = producesIo;
+        info->hasNoteOutput = hasNoteOutput;
         info->liveInstances = std::make_shared<std::atomic_uint32_t>(0);
 
         // Register. Pass `info` as the hostCtx argument — not hostApi.host_ctx
